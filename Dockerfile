@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml .
 COPY src/ src/
 COPY dashboard/ dashboard/
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir -e .
 
 # Create data directories for SQLite + the media upload queue
 RUN mkdir -p /app/data/uploads
