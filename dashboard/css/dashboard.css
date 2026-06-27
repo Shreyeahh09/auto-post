@@ -699,6 +699,68 @@ select.form-input {
     padding: 1.5rem;
 }
 
+/* ── Media library (upload sidebar + preview grid) ──────────────────────── */
+.media-layout {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 1.5rem;
+    align-items: start;
+}
+
+.media-layout .card {
+    position: sticky;
+    top: 1.5rem;
+}
+
+.media-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 1rem;
+}
+
+.media-tile {
+    background: var(--bg-glass);
+    border: 1px solid var(--bg-glass-border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    transition: background var(--transition-fast);
+}
+
+.media-tile:hover {
+    background: var(--bg-card-hover);
+}
+
+.media-tile .media-thumb {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    object-fit: cover;
+    display: block;
+    background: var(--bg-secondary);
+}
+
+.media-tile .media-meta {
+    padding: 0.6rem 0.7rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.media-tile .media-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+@media (max-width: 800px) {
+    .media-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .media-layout .card {
+        position: static;
+    }
+}
+
 /* ── Activity Feed ──────────────────────────────────────────────────────── */
 .activity-feed {
     display: flex;

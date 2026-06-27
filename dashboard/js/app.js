@@ -1259,37 +1259,49 @@ const App = {
             const body = document.getElementById('page-body');
 
             body.innerHTML = `
-                <div style="max-width: 700px;">
+                <div class="media-layout">
                     <div class="card slide-up">
                         <div class="card-header">
-                            <h3>Media Queue</h3>
+                            <h3>Upload</h3>
                         </div>
                         <div class="card-body">
-                            <form id="upload-form" class="mb-2" onsubmit="App.uploadMediaFile(event)">
+                            <form id="upload-form" onsubmit="App.uploadMediaFile(event)">
                                 <div class="form-group">
-                                    <label>Upload media</label>
+                                    <label>Image or video</label>
                                     <input class="form-input" type="file" id="upload-file" accept="image/*,video/*" required>
                                 </div>
                                 <div class="form-group">
                                     <label>Caption hint (optional)</label>
                                     <input class="form-input" id="upload-caption-hint" placeholder="What's in this photo/video?">
                                 </div>
-                                <button class="btn btn-secondary btn-sm" type="submit">Add to Queue</button>
+                                <button class="btn btn-primary btn-sm" type="submit">Add to Library</button>
                             </form>
-                            ${assets.length === 0 ? UI.emptyState('🖼️', 'Queue is empty', 'Upload media to get started.') : `
-                                <table class="table">
-                                    <thead><tr><th>Type</th><th>Status</th><th>Added</th><th></th></tr></thead>
-                                    <tbody>
-                                        ${assets.map(asset => `
-                                            <tr>
-                                                <td>${UI.esc(asset.media_type)}</td>
-                                                <td>${UI.badge(asset.status)}</td>
-                                                <td>${UI.timeAgo(asset.created_at)}</td>
-                                                <td>${asset.status === 'queued' ? `<button class="btn btn-sm btn-danger" onclick="App.deleteMediaAsset('${asset.id}')">Delete</button>` : ''}</td>
-                                            </tr>
-                                        `).join('')}
-                                    </tbody>
-                                </table>
+                        </div>
+                    </div>
+
+                    <div class="card slide-up">
+                        <div class="card-header">
+                            <h3>Media Library (${assets.length})</h3>
+                        </div>
+                        <div class="card-body">
+                            ${assets.length === 0 ? UI.emptyState('🖼️', 'Library is empty', 'Upload media on the left to get started.') : `
+                                <div class="media-grid">
+                                    ${assets.map(asset => `
+                                        <div class="media-tile">
+                                            ${asset.media_type === 'video'
+                                                ? `<video class="media-thumb" src="${UI.esc(asset.url)}" muted preload="metadata" controls></video>`
+                                                : `<img class="media-thumb" src="${UI.esc(asset.url)}" loading="lazy" alt="">`
+                                            }
+                                            <div class="media-meta">
+                                                <div class="media-actions">
+                                                    ${UI.badge(asset.status)}
+                                                    <span class="text-xs text-muted">${UI.timeAgo(asset.created_at)}</span>
+                                                </div>
+                                                ${asset.status === 'queued' ? `<button class="btn btn-sm btn-danger" onclick="App.deleteMediaAsset('${asset.id}')">Delete</button>` : ''}
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                </div>
                             `}
                         </div>
                     </div>

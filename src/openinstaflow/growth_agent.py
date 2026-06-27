@@ -167,12 +167,43 @@ async def analyze_account(customer_id: str) -> StrategyInsight:
         db.close()
 
 
-def _is_due(settings: AutopilotSettings) -> bool:
-    if not settings.last_planned_at:
-        return True
+async def _get_last_post_time(customer: Customer) -> Optional[datetime]:
+    """Best-effort fetch of the actual timestamp of the customer's most recent IG post.
+
+    Checking Graph directly (rather than only our own ``last_planned_at``) means the cadence
+    still holds even if the customer also posts manually outside the app.
+    """
+    if not customer.ig_access_token or not customer.ig_user_id:
+        return None
+    cfg = IgConfig(
+        access_token=customer.ig_access_token,
+        ig_user_id=customer.ig_user_id,
+        login_kind=customer.login_kind or "ig_login",
+    )
+    client = InstagramClient(cfg)
+    try:
+        media_data = await client.get(
+            f"{customer.ig_user_id}/media",
+            {"fields": "timestamp", "limit": 1},
+            {"token": customer.ig_access_token},
+        )
+        items = media_data.get("data", []) if isinstance(media_data, dict) else []
+        if items and items[0].get("timestamp"):
+            return _parse_ts(items[0]["timestamp"])
+    except Exception:
+        pass  # fall back to our own record below
+    return None
+
+
+async def _is_due(customer: Customer, settings: AutopilotSettings) -> bool:
     posts_per_week = max(settings.posts_per_week or 1, 1)
     interval = timedelta(days=7 / posts_per_week)
-    last = settings.last_planned_at
+
+    last = await _get_last_post_time(customer)
+    if last is None:
+        last = settings.last_planned_at
+    if last is None:
+        return True
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
     return datetime.now(timezone.utc) - last >= interval
@@ -200,7 +231,7 @@ async def plan_next_post(customer_id: str) -> Optional[Post]:
         settings = db.query(AutopilotSettings).filter_by(customer_id=customer.id).first()
         if not settings or not settings.enabled:
             return None
-        if not _is_due(settings):
+        if not await _is_due(customer, settings):
             return None
 
         asset = (
@@ -255,6 +286,21 @@ async def plan_next_post(customer_id: str) -> Optional[Post]:
         )
         db.add(post)
 
+        # Reshare the same media as a Story a few minutes later — staggered so the two
+        # container-creation calls don't land on the Graph API in the same instant.
+        story_post = Post(
+            customer_id=customer.id,
+            media_type="story",
+            media_source=asset.url,
+            caption=caption,
+            status=post_status,
+            scheduled_time=scheduled_time + timedelta(minutes=5),
+            media_asset_id=asset.id,
+            auto_generated=True,
+            caption_source="ai",
+        )
+        db.add(story_post)
+
         asset.status = "used"
         asset.used_at = datetime.now(timezone.utc)
 
@@ -262,6 +308,7 @@ async def plan_next_post(customer_id: str) -> Optional[Post]:
 
         db.commit()
         db.refresh(post)
+        db.refresh(story_post)
 
         asset.used_in_post_id = post.id
         db.commit()
@@ -269,11 +316,14 @@ async def plan_next_post(customer_id: str) -> Optional[Post]:
         if post_status == "pending":
             from .multi_scheduler import get_mt_scheduler
 
-            get_mt_scheduler().schedule_existing_post(post.id, scheduled_time)
+            scheduler = get_mt_scheduler()
+            scheduler.schedule_existing_post(post.id, scheduled_time)
+            scheduler.schedule_existing_post(story_post.id, story_post.scheduled_time)
 
         log_activity(
             db, customer.id, "autopilot_post_planned",
-            f"Planned {post.media_type} for {scheduled_time.isoformat()} (status={post_status})",
+            f"Planned {post.media_type} for {scheduled_time.isoformat()} plus a story "
+            f"for {story_post.scheduled_time.isoformat()} (status={post_status})",
         )
         # log_activity's own commit re-expires session objects; refresh once more so the
         # returned instance (including its lazy-loaded customer relationship, used by
