@@ -213,4 +213,69 @@ const API = {
     getMyActivity(limit = 30) {
         return this.get(`/me/activity?limit=${limit}`);
     },
+
+    // ── Customer: autopilot ────────────────────────────────────────────
+    getAutopilotSettings() {
+        return this.get('/me/autopilot');
+    },
+
+    updateAutopilotSettings(data) {
+        return this.put('/me/autopilot', data);
+    },
+
+    runAutopilotNow() {
+        return this.post('/me/autopilot/run-now', {});
+    },
+
+    // ── Customer: media queue ──────────────────────────────────────────
+    getMediaQueue(status) {
+        const qs = status ? `?status=${status}` : '';
+        return this.get(`/me/media${qs}`);
+    },
+
+    async uploadMedia(file, captionHint) {
+        // Direct-to-R2 upload: presign -> PUT straight to R2 (file bytes never touch our
+        // API) -> confirm, which is what actually creates the MediaAsset row.
+        const { object_key, upload_url } = await this.post('/me/media/presign', { filename: file.name });
+
+        const putResp = await fetch(upload_url, {
+            method: 'PUT',
+            headers: { 'Content-Type': file.type || 'application/octet-stream' },
+            body: file,
+        });
+        if (!putResp.ok) {
+            throw new Error(`Upload to storage failed (HTTP ${putResp.status}). Please try again.`);
+        }
+
+        return this.post('/me/media/confirm', { object_key, caption_hint: captionHint || undefined });
+    },
+
+    deleteMediaAsset(id) {
+        return this.delete(`/me/media/${id}`);
+    },
+
+    // ── Customer: Google Drive ─────────────────────────────────────────
+    getDriveStatus() {
+        return this.get('/me/google-drive/status');
+    },
+
+    getDriveAuthUrl() {
+        return this.get('/me/google-drive/auth-url');
+    },
+
+    listDriveFolders() {
+        return this.get('/me/google-drive/folders');
+    },
+
+    setDriveFolder(folder_id, folder_name) {
+        return this.put('/me/google-drive/folder', { folder_id, folder_name });
+    },
+
+    syncDriveNow() {
+        return this.post('/me/google-drive/sync-now', {});
+    },
+
+    disconnectDrive() {
+        return this.post('/me/google-drive/disconnect', {});
+    },
 };

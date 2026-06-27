@@ -59,13 +59,37 @@ class MultiTenantScheduler:
             print("[OpenInstaFlow] Multi-tenant scheduler started.", file=sys.stderr)
 
     async def _run_autopilot_tick(self) -> None:
-        """Periodic job: let the growth agent plan the next post for every autopilot customer."""
+        """Periodic job: sync linked Google Drives into the media queue, then let the growth
+        agent plan the next post for every autopilot customer."""
         from .growth_agent import run_autopilot_tick
+
+        await self._sync_google_drives()
 
         try:
             await run_autopilot_tick()
         except Exception as e:
             print(f"[Scheduler] Autopilot tick failed: {e}", file=sys.stderr)
+
+    async def _sync_google_drives(self) -> None:
+        """Pull new files from every customer's linked Drive folder into their media queue."""
+        from .gdrive_sync import sync_customer_drive
+
+        db = get_db()
+        try:
+            customer_ids = [
+                row.id
+                for row in db.query(Customer)
+                .filter(Customer.google_drive_refresh_token_enc.isnot(None))
+                .all()
+            ]
+        finally:
+            db.close()
+
+        for customer_id in customer_ids:
+            try:
+                await sync_customer_drive(customer_id)
+            except Exception as e:
+                print(f"[Scheduler] Google Drive sync failed for customer {customer_id}: {e}", file=sys.stderr)
 
     def schedule_existing_post(self, post_id: str, scheduled_time: datetime) -> None:
         """Register an APScheduler job for a Post row that already exists in the DB

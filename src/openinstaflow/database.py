@@ -175,6 +175,16 @@ def _migrate_schema() -> None:
             ("auto_generated", "BOOLEAN DEFAULT 0"),
             ("caption_source", "VARCHAR(20)"),
         ],
+        "customers": [
+            ("google_drive_refresh_token_enc", "TEXT"),
+            ("google_drive_email", "VARCHAR(255)"),
+            ("google_drive_folder_id", "VARCHAR(100)"),
+            ("google_drive_folder_name", "VARCHAR(255)"),
+        ],
+        "media_assets": [
+            ("source", "VARCHAR(20) DEFAULT 'upload'"),
+            ("source_file_id", "VARCHAR(100)"),
+        ],
     }
     with _engine.connect() as conn:
         for table, columns in additions.items():
@@ -236,6 +246,13 @@ class Customer(Base):
     fb_page_id = Column(String(100), nullable=True)
     fb_page_access_token_enc = Column(Text, nullable=True)
 
+    # Google Drive link (OAuth refresh token encrypted at rest; read-only access to one
+    # customer-chosen folder, used by the autopilot media queue — see gdrive_sync.py)
+    google_drive_refresh_token_enc = Column(Text, nullable=True)
+    google_drive_email = Column(String(255), nullable=True)
+    google_drive_folder_id = Column(String(100), nullable=True)
+    google_drive_folder_name = Column(String(255), nullable=True)
+
     # Status
     status = Column(String(20), default="pending")  # pending, active, paused, expired
     activated_at = Column(UTCDateTime, nullable=True)
@@ -265,6 +282,14 @@ class Customer(Base):
     def fb_page_access_token(self, value: str) -> None:
         self.fb_page_access_token_enc = encrypt_token(value) if value else ""
 
+    @property
+    def google_drive_refresh_token(self) -> str:
+        return decrypt_token(self.google_drive_refresh_token_enc or "")
+
+    @google_drive_refresh_token.setter
+    def google_drive_refresh_token(self, value: str) -> None:
+        self.google_drive_refresh_token_enc = encrypt_token(value) if value else ""
+
     def to_dict(self, include_sensitive: bool = False) -> dict:
         d = {
             "id": self.id,
@@ -277,6 +302,10 @@ class Customer(Base):
             "activated_at": self.activated_at.isoformat() if self.activated_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "post_count": len(self.posts) if self.posts else 0,
+            "google_drive_connected": bool(self.google_drive_refresh_token_enc),
+            "google_drive_email": self.google_drive_email,
+            "google_drive_folder_id": self.google_drive_folder_id,
+            "google_drive_folder_name": self.google_drive_folder_name,
         }
         if include_sensitive:
             d["ig_access_token"] = self.ig_access_token
@@ -373,13 +402,18 @@ class MediaAsset(Base):
     customer_id = Column(String(36), ForeignKey("customers.id"), nullable=False)
 
     media_type = Column(String(20), nullable=False)  # image, video
-    file_path = Column(Text, nullable=False)
+    file_path = Column(Text, nullable=False)  # R2 object key (see media_store.py), not a local path
     url = Column(Text, nullable=False)
     caption_hint = Column(Text, nullable=True)
     status = Column(String(20), default="queued")  # queued, used, failed
     used_in_post_id = Column(String(36), nullable=True)
     created_at = Column(UTCDateTime, default=lambda: datetime.now(timezone.utc))
     used_at = Column(UTCDateTime, nullable=True)
+
+    # Where this asset came from. "upload" = customer uploaded it directly; "google_drive" =
+    # imported by gdrive_sync.py from the customer's linked Drive folder.
+    source = Column(String(20), default="upload")
+    source_file_id = Column(String(100), nullable=True)  # Drive file id, for dedup on re-sync
 
     customer = relationship("Customer", back_populates="media_assets")
 
@@ -394,6 +428,7 @@ class MediaAsset(Base):
             "used_in_post_id": self.used_in_post_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "used_at": self.used_at.isoformat() if self.used_at else None,
+            "source": self.source,
         }
 
 

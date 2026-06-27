@@ -26,13 +26,13 @@ try:
 except ImportError:
     pass
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Header, Request, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr
 
-from . import ai_caption, growth_agent, media_store, supabase_auth
+from . import ai_caption, gdrive_oauth, gdrive_sync, growth_agent, local_media, media_store, supabase_auth
 from .client import InstagramClient
 from .config import IgConfig
 from .database import (
@@ -226,6 +226,20 @@ class AutopilotRequest(BaseModel):
 class ApprovePostRequest(BaseModel):
     caption: Optional[str] = None
     scheduled_time: Optional[str] = None
+
+
+class GoogleDriveFolderRequest(BaseModel):
+    folder_id: str
+    folder_name: str
+
+
+class MediaPresignRequest(BaseModel):
+    filename: str
+
+
+class MediaConfirmRequest(BaseModel):
+    object_key: str
+    caption_hint: Optional[str] = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -827,16 +841,30 @@ async def regenerate_draft_caption(post_id: str, payload: dict = Depends(require
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@app.post("/api/me/media")
-async def upload_media(
-    file: UploadFile = File(...),
-    caption_hint: Optional[str] = Form(None),
-    payload: dict = Depends(require_customer),
-):
-    """Upload a piece of media into the autopilot queue."""
-    customer_id = payload["sub"]
+@app.post("/api/me/media/presign")
+async def presign_media_upload(req: MediaPresignRequest, payload: dict = Depends(require_customer)):
+    """Get a presigned R2 URL the browser can PUT a file to directly (no bytes through this server)."""
     try:
-        file_path, public_url, media_type = media_store.save_upload(customer_id, file.filename or "upload", file.file)
+        presigned = media_store.create_presigned_upload(payload["sub"], req.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return presigned
+
+
+@app.post("/api/me/media/confirm")
+async def confirm_media_upload(req: MediaConfirmRequest, payload: dict = Depends(require_customer)):
+    """Record a media-queue entry after the browser has finished a presigned R2 upload."""
+    customer_id = payload["sub"]
+
+    # The object key is namespaced by customer id, so a customer can't confirm someone else's upload.
+    if not req.object_key.startswith(f"{customer_id}/"):
+        raise HTTPException(status_code=403, detail="Object key does not belong to this account")
+
+    if not media_store.object_exists(req.object_key):
+        raise HTTPException(status_code=400, detail="Upload not found in storage — it may have failed or expired")
+
+    try:
+        media_type = local_media.detect_media_type(req.object_key)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -845,14 +873,14 @@ async def upload_media(
         asset = MediaAsset(
             customer_id=customer_id,
             media_type=media_type,
-            file_path=file_path,
-            url=public_url,
-            caption_hint=caption_hint,
+            file_path=req.object_key,
+            url=media_store.object_url(req.object_key),
+            caption_hint=req.caption_hint,
         )
         db.add(asset)
         db.commit()
         db.refresh(asset)
-        log_activity(db, customer_id, "media_uploaded", f"Uploaded {media_type}: {file.filename}")
+        log_activity(db, customer_id, "media_uploaded", f"Uploaded {media_type} via direct browser upload")
         return {"asset": asset.to_dict()}
     finally:
         db.close()
@@ -882,12 +910,156 @@ async def delete_media(asset_id: str, payload: dict = Depends(require_customer))
             raise HTTPException(status_code=404, detail="Asset not found")
         if asset.status == "used":
             raise HTTPException(status_code=400, detail="Cannot delete an asset that's already been used in a post")
-        media_store.delete_upload(asset.file_path)
+        media_store.delete_object(asset.file_path)
         db.delete(asset)
         db.commit()
         return {"status": "deleted", "asset_id": asset_id}
     finally:
         db.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Customer: Google Drive linking
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/me/google-drive/auth-url")
+async def google_drive_auth_url(payload: dict = Depends(require_customer)):
+    """Build the Google consent screen URL for linking this customer's Drive."""
+    try:
+        url = gdrive_oauth.build_authorize_url(gdrive_oauth.encode_state(payload["sub"]))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"url": url}
+
+
+@app.get("/api/google-drive/callback")
+async def google_drive_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    """OAuth redirect target — Google sends the customer's browser here directly (no auth header)."""
+    base = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
+    settings_url = f"{base}/#/my-autopilot"
+
+    customer_id = gdrive_oauth.decode_state(state) if state else None
+    if error or not code or not customer_id:
+        return RedirectResponse(f"{settings_url}?gdrive=error")
+
+    db = get_db()
+    try:
+        customer = db.query(Customer).filter(Customer.id == customer_id).first()
+        if not customer:
+            return RedirectResponse(f"{settings_url}?gdrive=error")
+
+        try:
+            tokens = await gdrive_oauth.exchange_code(code)
+            refresh_token = tokens.get("refresh_token")
+            if not refresh_token:
+                # Google omits refresh_token if the customer already granted consent before
+                # without revoking it. Ask them to disconnect on Google's side and retry.
+                return RedirectResponse(f"{settings_url}?gdrive=error")
+            email = await gdrive_oauth.fetch_user_email(tokens["access_token"])
+        except Exception:
+            return RedirectResponse(f"{settings_url}?gdrive=error")
+
+        customer.google_drive_refresh_token = refresh_token
+        customer.google_drive_email = email
+        db.commit()
+        log_activity(db, customer_id, "google_drive_connected", email or "")
+        return RedirectResponse(f"{settings_url}?gdrive=connected")
+    finally:
+        db.close()
+
+
+@app.get("/api/me/google-drive/status")
+async def google_drive_status(payload: dict = Depends(require_customer)):
+    db = get_db()
+    try:
+        customer = db.query(Customer).filter(Customer.id == payload["sub"]).first()
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        return {
+            "connected": bool(customer.google_drive_refresh_token_enc),
+            "email": customer.google_drive_email,
+            "folder_id": customer.google_drive_folder_id,
+            "folder_name": customer.google_drive_folder_name,
+        }
+    finally:
+        db.close()
+
+
+@app.get("/api/me/google-drive/folders")
+async def google_drive_folders(payload: dict = Depends(require_customer)):
+    """List folders in the customer's linked Drive, for the folder picker."""
+    db = get_db()
+    try:
+        customer = db.query(Customer).filter(Customer.id == payload["sub"]).first()
+        if not customer or not customer.google_drive_refresh_token:
+            raise HTTPException(status_code=400, detail="Google Drive is not linked yet")
+        try:
+            folders = await gdrive_sync.list_folders(customer)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Failed to list Drive folders: {e}")
+        return {"folders": folders}
+    finally:
+        db.close()
+
+
+@app.put("/api/me/google-drive/folder")
+async def set_google_drive_folder(req: GoogleDriveFolderRequest, payload: dict = Depends(require_customer)):
+    """Choose which Drive folder the autopilot media queue should sync from."""
+    db = get_db()
+    try:
+        customer = db.query(Customer).filter(Customer.id == payload["sub"]).first()
+        if not customer or not customer.google_drive_refresh_token:
+            raise HTTPException(status_code=400, detail="Google Drive is not linked yet")
+        customer.google_drive_folder_id = req.folder_id
+        customer.google_drive_folder_name = req.folder_name
+        db.commit()
+        log_activity(db, payload["sub"], "google_drive_folder_set", req.folder_name)
+        return {"status": "ok", "folder_id": req.folder_id, "folder_name": req.folder_name}
+    finally:
+        db.close()
+
+
+@app.post("/api/me/google-drive/sync-now")
+async def google_drive_sync_now(payload: dict = Depends(require_customer)):
+    """Manually pull any new files from the linked Drive folder into the media queue."""
+    db = get_db()
+    try:
+        customer = db.query(Customer).filter(Customer.id == payload["sub"]).first()
+        if not customer or not customer.google_drive_refresh_token:
+            raise HTTPException(status_code=400, detail="Google Drive is not linked yet")
+        if not customer.google_drive_folder_id:
+            raise HTTPException(status_code=400, detail="No Drive folder selected yet")
+    finally:
+        db.close()
+
+    try:
+        imported = await gdrive_sync.sync_customer_drive(payload["sub"])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Drive sync failed: {e}")
+    return {"imported": imported}
+
+
+@app.post("/api/me/google-drive/disconnect")
+async def google_drive_disconnect(payload: dict = Depends(require_customer)):
+    db = get_db()
+    try:
+        customer = db.query(Customer).filter(Customer.id == payload["sub"]).first()
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        token = customer.google_drive_refresh_token
+        customer.google_drive_refresh_token = ""
+        customer.google_drive_email = None
+        customer.google_drive_folder_id = None
+        customer.google_drive_folder_name = None
+        db.commit()
+        log_activity(db, payload["sub"], "google_drive_disconnected", "")
+    finally:
+        db.close()
+
+    if token:
+        await gdrive_oauth.revoke_token(token)  # best-effort, after the DB session is released
+    return {"status": "disconnected"}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1247,7 +1419,6 @@ async def _do_schedule(customer: Customer, req: ScheduleRequest) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent.parent / "dashboard"
-UPLOADS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "uploads"
 
 
 @app.get("/")
@@ -1267,10 +1438,6 @@ if DASHBOARD_DIR.exists():
         app.mount("/css", StaticFiles(directory=str(css_dir)), name="css")
     if js_dir.exists():
         app.mount("/js", StaticFiles(directory=str(js_dir)), name="js")
-
-# Publicly served media queue uploads — Instagram + OpenAI vision fetch these by URL.
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

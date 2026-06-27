@@ -16,7 +16,9 @@ const App = {
 
     // ── Router ────────────────────────────────────────────────────────
     route() {
-        const hash = window.location.hash || '#/login';
+        const rawHash = window.location.hash || '#/login';
+        const [hash, hashQuery] = rawHash.split('?');
+        this.hashQuery = hashQuery || '';
         const [path, ...params] = hash.slice(2).split('/');
 
         if (!API.isLoggedIn() && path !== 'login' && path !== 'signup') {
@@ -50,6 +52,7 @@ const App = {
                 case 'my-dashboard': return this.renderMyDashboard(root);
                 case 'my-posts': return this.renderMyPosts(root);
                 case 'my-publish': return this.renderMyPublish(root);
+                case 'my-autopilot': return this.renderMyAutopilot(root);
                 case 'my-settings': return this.renderMySettings(root);
                 default: window.location.hash = '#/my-dashboard';
             }
@@ -88,6 +91,9 @@ const App = {
             </button>
             <button class="nav-item ${activePage === 'my-publish' ? 'active' : ''}" onclick="location.hash='#/my-publish'">
                 <span class="nav-icon">🚀</span> Publish / Schedule
+            </button>
+            <button class="nav-item ${activePage === 'my-autopilot' ? 'active' : ''}" onclick="location.hash='#/my-autopilot'">
+                <span class="nav-icon">🤖</span> Autopilot
             </button>
             <button class="nav-item ${activePage === 'my-settings' ? 'active' : ''}" onclick="location.hash='#/my-settings'">
                 <span class="nav-icon">⚙️</span> Settings
@@ -1038,6 +1044,286 @@ const App = {
             UI.toast(err.message, 'error');
             btn.disabled = false;
             btn.textContent = origText;
+        }
+    },
+
+    // ══════════════════════════════════════════════════════════════════
+    // CUSTOMER: Autopilot (settings, Google Drive link, media queue)
+    // ══════════════════════════════════════════════════════════════════
+
+    async renderMyAutopilot(root) {
+        this.withLayout(root, 'my-autopilot', 'Autopilot', '', UI.loading());
+
+        const params = new URLSearchParams(this.hashQuery || '');
+        const gdriveParam = params.get('gdrive');
+        if (gdriveParam === 'connected') UI.toast('Google Drive connected!', 'success');
+        else if (gdriveParam === 'error') UI.toast('Could not connect Google Drive. Please try again.', 'error');
+        if (gdriveParam) {
+            this.hashQuery = '';
+            window.location.hash = '#/my-autopilot'; // consume the one-shot param so it doesn't re-toast
+        }
+
+        try {
+            const [autopilotRes, driveRes, mediaRes] = await Promise.all([
+                API.getAutopilotSettings(),
+                API.getDriveStatus(),
+                API.getMediaQueue(),
+            ]);
+            const a = autopilotRes.autopilot;
+            const drive = driveRes;
+            const assets = mediaRes.assets || [];
+            const body = document.getElementById('page-body');
+
+            let folderOptions = '';
+            if (drive.connected) {
+                try {
+                    const { folders } = await API.listDriveFolders();
+                    folderOptions = folders.map(f =>
+                        `<option value="${UI.esc(f.id)}" ${f.id === drive.folder_id ? 'selected' : ''}>${UI.esc(f.name)}</option>`
+                    ).join('');
+                } catch (err) {
+                    folderOptions = '';
+                }
+            }
+
+            body.innerHTML = `
+                <div style="max-width: 700px;">
+                    <div class="card mb-3 slide-up">
+                        <div class="card-header">
+                            <h3>Autopilot Settings</h3>
+                            <button class="btn btn-sm btn-secondary" onclick="App.runAutopilotNow()">Run Now</button>
+                        </div>
+                        <div class="card-body">
+                            <p class="text-sm text-muted mb-2">When enabled, the growth agent picks the oldest queued media, writes a caption, and ${a.auto_publish ? 'publishes' : 'drafts for your approval'} it on a recurring schedule.</p>
+                            <form id="autopilot-form" onsubmit="App.saveAutopilotSettings(event)">
+                                <div class="form-group">
+                                    <label><input type="checkbox" id="ap-enabled" ${a.enabled ? 'checked' : ''}> Enable autopilot</label>
+                                </div>
+                                <div class="form-group">
+                                    <label><input type="checkbox" id="ap-auto-publish" ${a.auto_publish ? 'checked' : ''}> Auto-publish (off = draft for approval)</label>
+                                </div>
+                                <div class="form-group">
+                                    <label>Posts per week</label>
+                                    <input class="form-input" type="number" id="ap-posts-per-week" min="1" value="${a.posts_per_week ?? 3}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Preferred hours (24h, comma-separated)</label>
+                                    <input class="form-input" id="ap-preferred-hours" placeholder="9, 13, 19" value="${UI.esc((a.preferred_hours || []).join(', '))}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Timezone (IANA, e.g. America/New_York)</label>
+                                    <input class="form-input" id="ap-timezone" value="${UI.esc(a.timezone || 'UTC')}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Niche</label>
+                                    <input class="form-input" id="ap-niche" value="${UI.esc(a.niche || '')}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Tone</label>
+                                    <input class="form-input" id="ap-tone" value="${UI.esc(a.tone || '')}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Goal</label>
+                                    <input class="form-input" id="ap-goal" value="${UI.esc(a.goal || '')}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Target location</label>
+                                    <input class="form-input" id="ap-location" value="${UI.esc(a.target_location || '')}">
+                                </div>
+                                <button class="btn btn-primary mt-1" type="submit" id="ap-save-btn">Save Settings</button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div class="card mb-3 slide-up">
+                        <div class="card-header">
+                            <h3>Google Drive</h3>
+                        </div>
+                        <div class="card-body">
+                            ${drive.connected ? `
+                                <p class="text-sm mb-2">Connected as <strong>${UI.esc(drive.email || 'unknown')}</strong>.</p>
+                                <div class="form-group">
+                                    <label>Folder to sync media from</label>
+                                    <select class="form-input" id="drive-folder-select">
+                                        <option value="">— Select a folder —</option>
+                                        ${folderOptions}
+                                    </select>
+                                </div>
+                                <div class="d-flex gap-2">
+                                    <button class="btn btn-secondary btn-sm" onclick="App.saveDriveFolder()">Save Folder</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="App.syncDriveNow()">Sync Now</button>
+                                    <button class="btn btn-danger btn-sm" onclick="App.disconnectDrive()">Disconnect</button>
+                                </div>
+                                ${drive.folder_name ? `<p class="text-xs text-muted mt-1">Currently syncing from: ${UI.esc(drive.folder_name)}</p>` : '<p class="text-xs text-muted mt-1">Pick a folder above, then Save.</p>'}
+                            ` : `
+                                <p class="text-sm text-muted mb-2">Link your Google Drive so autopilot can pull new photos/videos straight from a folder you choose.</p>
+                                <button class="btn btn-primary btn-sm" onclick="App.connectGoogleDrive()">Connect Google Drive</button>
+                            `}
+                        </div>
+                    </div>
+
+                    <div class="card slide-up">
+                        <div class="card-header">
+                            <h3>Media Queue</h3>
+                        </div>
+                        <div class="card-body">
+                            <form id="upload-form" class="mb-2" onsubmit="App.uploadMediaFile(event)">
+                                <div class="form-group">
+                                    <label>Upload media</label>
+                                    <input class="form-input" type="file" id="upload-file" accept="image/*,video/*" required>
+                                </div>
+                                <div class="form-group">
+                                    <label>Caption hint (optional)</label>
+                                    <input class="form-input" id="upload-caption-hint" placeholder="What's in this photo/video?">
+                                </div>
+                                <button class="btn btn-secondary btn-sm" type="submit">Add to Queue</button>
+                            </form>
+                            ${assets.length === 0 ? UI.emptyState('🖼️', 'Queue is empty', 'Upload media or connect Google Drive to get started.') : `
+                                <table class="table">
+                                    <thead><tr><th>Type</th><th>Source</th><th>Status</th><th>Added</th><th></th></tr></thead>
+                                    <tbody>
+                                        ${assets.map(asset => `
+                                            <tr>
+                                                <td>${UI.esc(asset.media_type)}</td>
+                                                <td>${asset.source === 'google_drive' ? 'Google Drive' : 'Uploaded'}</td>
+                                                <td>${UI.badge(asset.status)}</td>
+                                                <td>${UI.timeAgo(asset.created_at)}</td>
+                                                <td>${asset.status === 'queued' ? `<button class="btn btn-sm btn-danger" onclick="App.deleteMediaAsset('${asset.id}')">Delete</button>` : ''}</td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            `}
+                        </div>
+                    </div>
+                </div>
+            `;
+        } catch (err) {
+            document.getElementById('page-body').innerHTML = `<p style="color:var(--accent-red);">Error: ${UI.esc(err.message)}</p>`;
+        }
+    },
+
+    async saveAutopilotSettings(e) {
+        e.preventDefault();
+        const btn = document.getElementById('ap-save-btn');
+        btn.disabled = true;
+        btn.textContent = 'Saving...';
+
+        try {
+            const hoursRaw = document.getElementById('ap-preferred-hours').value;
+            const preferred_hours = hoursRaw
+                .split(',')
+                .map(s => parseInt(s.trim(), 10))
+                .filter(n => !isNaN(n));
+
+            await API.updateAutopilotSettings({
+                enabled: document.getElementById('ap-enabled').checked,
+                auto_publish: document.getElementById('ap-auto-publish').checked,
+                posts_per_week: parseInt(document.getElementById('ap-posts-per-week').value, 10) || 1,
+                preferred_hours,
+                timezone: document.getElementById('ap-timezone').value || 'UTC',
+                niche: document.getElementById('ap-niche').value,
+                tone: document.getElementById('ap-tone').value,
+                goal: document.getElementById('ap-goal').value,
+                target_location: document.getElementById('ap-location').value,
+            });
+            UI.toast('Autopilot settings saved!', 'success');
+            this.route();
+        } catch (err) {
+            UI.toast(err.message, 'error');
+            btn.disabled = false;
+            btn.textContent = 'Save Settings';
+        }
+    },
+
+    async runAutopilotNow() {
+        UI.toast('Asking the growth agent to plan a post...', 'info');
+        try {
+            const result = await API.runAutopilotNow();
+            if (result.status === 'planned') {
+                UI.toast('Post planned! Check My Posts.', 'success');
+            } else {
+                UI.toast(result.message || 'No post was planned.', 'info');
+            }
+        } catch (err) {
+            UI.toast(err.message, 'error');
+        }
+    },
+
+    async connectGoogleDrive() {
+        try {
+            const { url } = await API.getDriveAuthUrl();
+            window.location.href = url;
+        } catch (err) {
+            UI.toast(err.message, 'error');
+        }
+    },
+
+    async saveDriveFolder() {
+        const select = document.getElementById('drive-folder-select');
+        const folderId = select.value;
+        if (!folderId) {
+            UI.toast('Pick a folder first.', 'error');
+            return;
+        }
+        const folderName = select.options[select.selectedIndex].textContent;
+        try {
+            await API.setDriveFolder(folderId, folderName);
+            UI.toast('Folder saved.', 'success');
+            this.route();
+        } catch (err) {
+            UI.toast(err.message, 'error');
+        }
+    },
+
+    async syncDriveNow() {
+        UI.toast('Syncing from Google Drive...', 'info');
+        try {
+            const { imported } = await API.syncDriveNow();
+            UI.toast(imported > 0 ? `Imported ${imported} new file(s).` : 'No new files found.', 'success');
+            this.route();
+        } catch (err) {
+            UI.toast(err.message, 'error');
+        }
+    },
+
+    async disconnectDrive() {
+        const ok = await UI.confirm('Disconnect Google Drive', 'Autopilot will stop syncing media from Drive. Already-queued items are kept.');
+        if (!ok) return;
+        try {
+            await API.disconnectDrive();
+            UI.toast('Google Drive disconnected.', 'success');
+            this.route();
+        } catch (err) {
+            UI.toast(err.message, 'error');
+        }
+    },
+
+    async uploadMediaFile(e) {
+        e.preventDefault();
+        const fileInput = document.getElementById('upload-file');
+        const file = fileInput.files[0];
+        if (!file) return;
+        const captionHint = document.getElementById('upload-caption-hint').value;
+
+        try {
+            await API.uploadMedia(file, captionHint);
+            UI.toast('Added to media queue.', 'success');
+            this.route();
+        } catch (err) {
+            UI.toast(err.message, 'error');
+        }
+    },
+
+    async deleteMediaAsset(assetId) {
+        const ok = await UI.confirm('Delete Media', 'Remove this item from the queue?');
+        if (!ok) return;
+        try {
+            await API.deleteMediaAsset(assetId);
+            UI.toast('Deleted.', 'success');
+            this.route();
+        } catch (err) {
+            UI.toast(err.message, 'error');
         }
     },
 
