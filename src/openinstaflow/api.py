@@ -676,6 +676,59 @@ async def cancel_post(post_id: str, payload: dict = Depends(require_admin)):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Admin: Media queue (cross-customer)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/media")
+async def list_all_media(status: Optional[str] = None, limit: int = 100, payload: dict = Depends(require_admin)):
+    """List media-queue assets across all customers."""
+    db = get_db()
+    try:
+        q = db.query(MediaAsset).order_by(MediaAsset.created_at.desc())
+        if status:
+            q = q.filter(MediaAsset.status == status)
+        assets = q.limit(min(limit, 500)).all()
+        return {"assets": [a.to_dict() for a in assets]}
+    finally:
+        db.close()
+
+
+@app.get("/api/customers/{customer_id}/media")
+async def list_customer_media(customer_id: str, payload: dict = Depends(require_admin)):
+    """List media-queue assets for a specific customer."""
+    db = get_db()
+    try:
+        assets = (
+            db.query(MediaAsset)
+            .filter(MediaAsset.customer_id == customer_id)
+            .order_by(MediaAsset.created_at.desc())
+            .all()
+        )
+        return {"assets": [a.to_dict() for a in assets]}
+    finally:
+        db.close()
+
+
+@app.delete("/api/media/{asset_id}")
+async def delete_media_admin(asset_id: str, payload: dict = Depends(require_admin)):
+    """Delete a media-queue asset (admin action, any customer)."""
+    db = get_db()
+    try:
+        asset = db.query(MediaAsset).filter(MediaAsset.id == asset_id).first()
+        if not asset:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        if asset.status == "used":
+            raise HTTPException(status_code=400, detail="Cannot delete an asset that's already been used in a post")
+        media_store.delete_object(asset.file_path)
+        db.delete(asset)
+        db.commit()
+        return {"status": "deleted", "asset_id": asset_id}
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Customer: Self-serve endpoints
 # ──────────────────────────────────────────────────────────────────────────────
 

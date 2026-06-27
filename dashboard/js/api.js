@@ -181,6 +181,20 @@ const API = {
         return this.get(`/activity?limit=${limit}`);
     },
 
+    // ── Admin: media queue (cross-customer) ────────────────────────────
+    getAllMedia(status) {
+        const qs = status ? `?status=${status}` : '';
+        return this.get(`/media${qs}`);
+    },
+
+    getCustomerMedia(customerId) {
+        return this.get(`/customers/${customerId}/media`);
+    },
+
+    deleteMediaAdmin(id) {
+        return this.delete(`/media/${id}`);
+    },
+
     // ── Customer self-serve endpoints ─────────────────────────────────
     getMyProfile() {
         return this.get('/me');

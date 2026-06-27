@@ -42,6 +42,7 @@ const App = {
                 case 'customer': return this.renderCustomerDetail(root, params[0]);
                 case 'codes': return this.renderActivationCodes(root);
                 case 'posts': return this.renderAllPosts(root);
+                case 'media': return this.renderAllMedia(root);
                 case 'activity': return this.renderActivity(root);
                 default: window.location.hash = '#/dashboard';
             }
@@ -75,6 +76,9 @@ const App = {
             </button>
             <button class="nav-item ${activePage === 'posts' ? 'active' : ''}" onclick="location.hash='#/posts'">
                 <span class="nav-icon">📸</span> All Posts
+            </button>
+            <button class="nav-item ${activePage === 'media' ? 'active' : ''}" onclick="location.hash='#/media'">
+                <span class="nav-icon">🖼️</span> All Media
             </button>
             <button class="nav-item ${activePage === 'codes' ? 'active' : ''}" onclick="location.hash='#/codes'">
                 <span class="nav-icon">🔑</span> Activation Codes
@@ -736,6 +740,87 @@ const App = {
             await API.cancelPost(postId);
             UI.toast('Post cancelled.', 'success');
             this.filterPosts();
+        } catch (err) {
+            UI.toast(err.message, 'error');
+        }
+    },
+
+    // ══════════════════════════════════════════════════════════════════
+    // ADMIN: All Media
+    // ══════════════════════════════════════════════════════════════════
+
+    async renderAllMedia(root) {
+        this.withLayout(root, 'media', 'All Media',
+            `<select class="form-input" style="width:auto;" id="media-filter" onchange="App.filterMedia()">
+                <option value="">All Statuses</option>
+                <option value="queued">Queued</option>
+                <option value="used">Used</option>
+                <option value="failed">Failed</option>
+            </select>`,
+            UI.loading());
+
+        await this._loadMedia();
+    },
+
+    async _loadMedia(status) {
+        try {
+            const data = await API.getAllMedia(status);
+            const assets = data.assets;
+            const body = document.getElementById('page-body');
+
+            if (assets.length === 0) {
+                body.innerHTML = UI.emptyState('🖼️', 'No media found', 'Media will appear here once customers upload files or connect Google Drive.');
+                return;
+            }
+
+            body.innerHTML = `
+                <div class="data-table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Customer</th>
+                                <th>Type</th>
+                                <th>Source</th>
+                                <th>Status</th>
+                                <th>Added</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${assets.map(a => `
+                                <tr>
+                                    <td>${UI.esc(a.customer_name || '—')}</td>
+                                    <td>${UI.esc(a.media_type)}</td>
+                                    <td>${a.source === 'google_drive' ? 'Google Drive' : 'Uploaded'}</td>
+                                    <td>${UI.badge(a.status)}</td>
+                                    <td class="text-sm">${UI.timeAgo(a.created_at)}</td>
+                                    <td>
+                                        <a href="${a.url}" target="_blank" class="btn btn-sm btn-secondary">View ↗</a>
+                                        ${a.status !== 'used' ? `<button class="btn btn-sm btn-danger" onclick="App.deleteMediaAdmin('${a.id}')">Delete</button>` : ''}
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        } catch (err) {
+            document.getElementById('page-body').innerHTML = `<p style="color:var(--accent-red);">Error: ${UI.esc(err.message)}</p>`;
+        }
+    },
+
+    filterMedia() {
+        const filter = document.getElementById('media-filter')?.value;
+        this._loadMedia(filter || undefined);
+    },
+
+    async deleteMediaAdmin(assetId) {
+        const ok = await UI.confirm('Delete Media', 'Remove this item from the customer\'s queue?');
+        if (!ok) return;
+        try {
+            await API.deleteMediaAdmin(assetId);
+            UI.toast('Deleted.', 'success');
+            this.filterMedia();
         } catch (err) {
             UI.toast(err.message, 'error');
         }

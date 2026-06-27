@@ -428,6 +428,7 @@ class MediaAsset(Base):
         return {
             "id": self.id,
             "customer_id": self.customer_id,
+            "customer_name": self.customer.name if self.customer else None,
             "media_type": self.media_type,
             "url": self.url,
             "caption_hint": self.caption_hint,
