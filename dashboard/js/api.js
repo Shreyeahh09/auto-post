@@ -267,29 +267,4 @@ const API = {
     deleteMediaAsset(id) {
         return this.delete(`/me/media/${id}`);
     },
-
-    // ── Customer: Google Drive ─────────────────────────────────────────
-    getDriveStatus() {
-        return this.get('/me/google-drive/status');
-    },
-
-    getDriveAuthUrl() {
-        return this.get('/me/google-drive/auth-url');
-    },
-
-    listDriveFolders() {
-        return this.get('/me/google-drive/folders');
-    },
-
-    setDriveFolder(folder_id, folder_name) {
-        return this.put('/me/google-drive/folder', { folder_id, folder_name });
-    },
-
-    syncDriveNow() {
-        return this.post('/me/google-drive/sync-now', {});
-    },
-
-    disconnectDrive() {
-        return this.post('/me/google-drive/disconnect', {});
-    },
 };

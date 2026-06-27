@@ -3,9 +3,7 @@ Cloudflare R2 (S3-compatible) storage for the customer media queue.
 
 Customer uploads go straight from the browser to R2 via a presigned PUT URL — file bytes
 never pass through this server (see ``create_presigned_upload`` + ``/api/me/media/presign``
-and ``/api/me/media/confirm`` in ``api.py``). Google Drive imports go through ``put_bytes``
-instead, since ``gdrive_sync.py`` already has the bytes in hand after downloading them
-server-side from the Drive API.
+and ``/api/me/media/confirm`` in ``api.py``).
 
 Requires an R2 bucket with public read access (either the bucket's `r2.dev` subdomain or a
 custom domain mapped to it — see R2_PUBLIC_BASE_URL) and CORS configured to allow PUT from
@@ -22,7 +20,7 @@ from typing import Optional
 import boto3
 from botocore.config import Config
 
-from .local_media import ALL_MEDIA_EXTENSIONS, IMAGE_EXTENSIONS, MIME_MAP
+from .local_media import ALL_MEDIA_EXTENSIONS, IMAGE_EXTENSIONS
 
 _client = None
 
@@ -97,20 +95,6 @@ def object_exists(object_key: str) -> bool:
         return True
     except Exception:
         return False
-
-
-def put_bytes(customer_id: str, filename: str, content: bytes) -> tuple[str, str, str]:
-    """
-    Server-side upload — used by gdrive_sync.py, which already holds the file's bytes.
-
-    Returns (object_key, public_url, media_type).
-    """
-    ext, media_type = _validate_extension(filename)
-    object_key = f"{customer_id}/{uuid.uuid4().hex}{ext}"
-    content_type = MIME_MAP.get(ext, "application/octet-stream")
-
-    _r2_client().put_object(Bucket=_bucket(), Key=object_key, Body=content, ContentType=content_type)
-    return object_key, object_url(object_key), media_type
 
 
 def delete_object(object_key: Optional[str]) -> bool:

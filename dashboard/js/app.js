@@ -773,7 +773,7 @@ const App = {
             const body = document.getElementById('page-body');
 
             if (assets.length === 0) {
-                body.innerHTML = UI.emptyState('🖼️', 'No media found', 'Media will appear here once customers upload files or connect Google Drive.');
+                body.innerHTML = UI.emptyState('🖼️', 'No media found', 'Media will appear here once customers upload files.');
                 return;
             }
 
@@ -784,7 +784,6 @@ const App = {
                             <tr>
                                 <th>Customer</th>
                                 <th>Type</th>
-                                <th>Source</th>
                                 <th>Status</th>
                                 <th>Added</th>
                                 <th>Actions</th>
@@ -795,7 +794,6 @@ const App = {
                                 <tr>
                                     <td>${UI.esc(a.customer_name || '—')}</td>
                                     <td>${UI.esc(a.media_type)}</td>
-                                    <td>${a.source === 'google_drive' ? 'Google Drive' : 'Uploaded'}</td>
                                     <td>${UI.badge(a.status)}</td>
                                     <td class="text-sm">${UI.timeAgo(a.created_at)}</td>
                                     <td>
@@ -1250,71 +1248,18 @@ const App = {
     },
 
     // ══════════════════════════════════════════════════════════════════
-    // CUSTOMER: Media (Google Drive link + upload + media queue)
+    // CUSTOMER: Media (upload + media queue)
     // ══════════════════════════════════════════════════════════════════
 
     async renderMyMedia(root) {
         this.withLayout(root, 'my-media', 'Media', '', UI.loading());
 
-        const params = new URLSearchParams(this.hashQuery || '');
-        const gdriveParam = params.get('gdrive');
-        if (gdriveParam === 'connected') UI.toast('Google Drive connected!', 'success');
-        else if (gdriveParam === 'error') UI.toast('Could not connect Google Drive. Please try again.', 'error');
-        if (gdriveParam) {
-            this.hashQuery = '';
-            window.location.hash = '#/my-media'; // consume the one-shot param so it doesn't re-toast
-        }
-
         try {
-            const [driveRes, mediaRes] = await Promise.all([
-                API.getDriveStatus(),
-                API.getMediaQueue(),
-            ]);
-            const drive = driveRes;
-            const assets = mediaRes.assets || [];
+            const { assets } = await API.getMediaQueue();
             const body = document.getElementById('page-body');
-
-            let folderOptions = '';
-            if (drive.connected) {
-                try {
-                    const { folders } = await API.listDriveFolders();
-                    folderOptions = folders.map(f =>
-                        `<option value="${UI.esc(f.id)}" ${f.id === drive.folder_id ? 'selected' : ''}>${UI.esc(f.name)}</option>`
-                    ).join('');
-                } catch (err) {
-                    folderOptions = '';
-                }
-            }
 
             body.innerHTML = `
                 <div style="max-width: 700px;">
-                    <div class="card mb-3 slide-up">
-                        <div class="card-header">
-                            <h3>Google Drive</h3>
-                        </div>
-                        <div class="card-body">
-                            ${drive.connected ? `
-                                <p class="text-sm mb-2">Connected as <strong>${UI.esc(drive.email || 'unknown')}</strong>.</p>
-                                <div class="form-group">
-                                    <label>Folder to sync media from</label>
-                                    <select class="form-input" id="drive-folder-select">
-                                        <option value="">— Select a folder —</option>
-                                        ${folderOptions}
-                                    </select>
-                                </div>
-                                <div class="d-flex gap-2">
-                                    <button class="btn btn-secondary btn-sm" onclick="App.saveDriveFolder()">Save Folder</button>
-                                    <button class="btn btn-secondary btn-sm" onclick="App.syncDriveNow()">Sync Now</button>
-                                    <button class="btn btn-danger btn-sm" onclick="App.disconnectDrive()">Disconnect</button>
-                                </div>
-                                ${drive.folder_name ? `<p class="text-xs text-muted mt-1">Currently syncing from: ${UI.esc(drive.folder_name)}</p>` : '<p class="text-xs text-muted mt-1">Pick a folder above, then Save.</p>'}
-                            ` : `
-                                <p class="text-sm text-muted mb-2">Link your Google Drive so autopilot can pull new photos/videos straight from a folder you choose.</p>
-                                <button class="btn btn-primary btn-sm" onclick="App.connectGoogleDrive()">Connect Google Drive</button>
-                            `}
-                        </div>
-                    </div>
-
                     <div class="card slide-up">
                         <div class="card-header">
                             <h3>Media Queue</h3>
@@ -1331,14 +1276,13 @@ const App = {
                                 </div>
                                 <button class="btn btn-secondary btn-sm" type="submit">Add to Queue</button>
                             </form>
-                            ${assets.length === 0 ? UI.emptyState('🖼️', 'Queue is empty', 'Upload media or connect Google Drive to get started.') : `
+                            ${assets.length === 0 ? UI.emptyState('🖼️', 'Queue is empty', 'Upload media to get started.') : `
                                 <table class="table">
-                                    <thead><tr><th>Type</th><th>Source</th><th>Status</th><th>Added</th><th></th></tr></thead>
+                                    <thead><tr><th>Type</th><th>Status</th><th>Added</th><th></th></tr></thead>
                                     <tbody>
                                         ${assets.map(asset => `
                                             <tr>
                                                 <td>${UI.esc(asset.media_type)}</td>
-                                                <td>${asset.source === 'google_drive' ? 'Google Drive' : 'Uploaded'}</td>
                                                 <td>${UI.badge(asset.status)}</td>
                                                 <td>${UI.timeAgo(asset.created_at)}</td>
                                                 <td>${asset.status === 'queued' ? `<button class="btn btn-sm btn-danger" onclick="App.deleteMediaAsset('${asset.id}')">Delete</button>` : ''}</td>
@@ -1353,55 +1297,6 @@ const App = {
             `;
         } catch (err) {
             document.getElementById('page-body').innerHTML = `<p style="color:var(--accent-red);">Error: ${UI.esc(err.message)}</p>`;
-        }
-    },
-
-    async connectGoogleDrive() {
-        try {
-            const { url } = await API.getDriveAuthUrl();
-            window.location.href = url;
-        } catch (err) {
-            UI.toast(err.message, 'error');
-        }
-    },
-
-    async saveDriveFolder() {
-        const select = document.getElementById('drive-folder-select');
-        const folderId = select.value;
-        if (!folderId) {
-            UI.toast('Pick a folder first.', 'error');
-            return;
-        }
-        const folderName = select.options[select.selectedIndex].textContent;
-        try {
-            await API.setDriveFolder(folderId, folderName);
-            UI.toast('Folder saved.', 'success');
-            this.route();
-        } catch (err) {
-            UI.toast(err.message, 'error');
-        }
-    },
-
-    async syncDriveNow() {
-        UI.toast('Syncing from Google Drive...', 'info');
-        try {
-            const { imported } = await API.syncDriveNow();
-            UI.toast(imported > 0 ? `Imported ${imported} new file(s).` : 'No new files found.', 'success');
-            this.route();
-        } catch (err) {
-            UI.toast(err.message, 'error');
-        }
-    },
-
-    async disconnectDrive() {
-        const ok = await UI.confirm('Disconnect Google Drive', 'Autopilot will stop syncing media from Drive. Already-queued items are kept.');
-        if (!ok) return;
-        try {
-            await API.disconnectDrive();
-            UI.toast('Google Drive disconnected.', 'success');
-            this.route();
-        } catch (err) {
-            UI.toast(err.message, 'error');
         }
     },
 
